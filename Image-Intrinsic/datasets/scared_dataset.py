@@ -3,6 +3,8 @@ from __future__ import absolute_import, division, print_function
 import os
 import numpy as np
 import PIL.Image as pil
+# from PIL import Image
+# import Image as pil
 import cv2
 
 from .mono_dataset import MonoDataset
@@ -39,9 +41,9 @@ class SCAREDRAWDataset(SCAREDDataset):
 
     def get_image_path(self, folder, frame_index, side):
         f_str = "{:06d}{}".format(frame_index, self.img_ext)
-        # image_path = os.path.join(
-        #     self.data_path, folder, "left_img", f_str)
-        image_path = os.path.join(folder)
+        image_path = os.path.join(
+            self.data_path, folder, "left_img", f_str)
+        # image_path = os.path.join(folder)
 
         return image_path
 
