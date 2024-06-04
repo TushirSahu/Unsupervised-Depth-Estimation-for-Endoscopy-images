@@ -31,7 +31,7 @@ def transformation_from_parameters(axisangle, translation, invert=False):
 
     if invert:
         R = R.transpose(1, 2)
-        t *= -1
+        t = t* -1
 
     T = get_translation_matrix(t)
 
@@ -99,6 +99,19 @@ def rot_from_axisangle(vec):
     rot[:, 3, 3] = 1
 
     return rot
+
+
+class Conv1x1(nn.Module):
+    """Layer to pad and convolve input
+    """
+    def __init__(self, in_channels, out_channels):
+        super(Conv1x1, self).__init__()
+
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1,stride =1)
+
+    def forward(self, x):
+        out = self.conv(x)
+        return out
 
 
 class ConvBlock(nn.Module):
@@ -178,7 +191,7 @@ class Project3D(nn.Module):
 
     def forward(self, points, K, T):
         P = torch.matmul(K, T)[:, :3, :]
-    
+
         cam_points = torch.matmul(P, points)
 
         pix_coords = cam_points[:, :2, :] / (cam_points[:, 2, :].unsqueeze(1) + self.eps)
@@ -221,7 +234,7 @@ def upsample(x):
     return F.interpolate(x, scale_factor=2, mode="nearest")
 
 
-def get_smooth_loss(disp, img): #edge aware loss
+def get_smooth_loss(disp, img):
     
     """Computes the smoothness loss for a disparity image
     The color image is used for edge-aware smoothness
@@ -232,8 +245,8 @@ def get_smooth_loss(disp, img): #edge aware loss
     grad_img_x = torch.mean(torch.abs(img[:, :, :, :-1] - img[:, :, :, 1:]), 1, keepdim=True)
     grad_img_y = torch.mean(torch.abs(img[:, :, :-1, :] - img[:, :, 1:, :]), 1, keepdim=True)
 
-    grad_disp_x *= torch.exp(-grad_img_x)
-    grad_disp_y *= torch.exp(-grad_img_y)
+    grad_disp_x = grad_disp_x* torch.exp(-grad_img_x)
+    grad_disp_y = grad_disp_y * torch.exp(-grad_img_y)
 
     return grad_disp_x.mean() + grad_disp_y.mean()
 
@@ -351,4 +364,3 @@ class SpatialTransformer(nn.Module):
             new_locs = new_locs[..., [2, 1, 0]]
 
         return F.grid_sample(src, new_locs, mode=self.mode, padding_mode="border",align_corners=True)
-

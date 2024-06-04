@@ -24,7 +24,7 @@ class Trainer:
         self.parameters_to_train = []  # 列表
         self.parameters_to_train_1 = []
 
-        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda")
+        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda:1")
         # self.device =torch.device("cpu")
 
         self.num_scales = len(self.opt.scales)  # 4
@@ -70,6 +70,10 @@ class Trainer:
             num_frames_to_predict_for=2)
         self.models["pose"].to(self.device)
         self.parameters_to_train += list(self.models["pose"].parameters())
+
+        # self.models['depth_attention'] = networks.Depth_Attention(self.models["encoder"].num_ch_enc, self.models["encoder"].num_ch_enc)
+        # self.models['depth_attention'].to(self.device)
+        # self.parameters_to_train += list(self.models['depth_attention'].parameters())
 
         self.model_optimizer = optim.Adam(self.parameters_to_train,self.opt.learning_rate)
         self.model_lr_scheduler = optim.lr_scheduler.MultiStepLR(
@@ -153,6 +157,10 @@ class Trainer:
             param.requires_grad = True
         for param in self.models["adjust_net"].parameters():
             param.requires_grad = True
+        
+        # for param in self.models['depth_attention'].parameters():
+        #     param.requires_grad = True
+        
 
         self.models["encoder"].train()
         self.models["depth"].train()
@@ -161,6 +169,7 @@ class Trainer:
         self.models["decompose_encoder"].train()
         self.models["decompose"].train()
         self.models["adjust_net"].train()
+        # self.models['depth_attention'].train()
 
 
     def set_eval(self):
@@ -173,6 +182,7 @@ class Trainer:
         self.models["decompose_encoder"].eval()
         self.models["decompose"].eval()
         self.models["adjust_net"].eval()
+        # self.models['depth_attention'].eval()
        
 
     def train(self):
@@ -226,6 +236,9 @@ class Trainer:
 
         # we only feed the image with frame_id 0 through the depth encoder
         features = self.models["encoder"](inputs["color_aug", 0, 0])
+        # print(self.models["encoder"].num_ch_enc)
+        # features1 =  self.models['depth_attention'](features)
+
         outputs = self.models["depth"](features)
 
         # pose
@@ -404,6 +417,9 @@ class Trainer:
                     "disp/{}".format(j),
                    visualize_depth(outputs[("disp", 0)][j]), self.step)
                 writer.add_image(
+                    "reconstructed/{}".format(j),
+                    outputs[("reprojection_color_warp", 0, 1)][j].data, self.step)
+                writer.add_image(
                         "input/{}".format(j),
                         inputs[("color", 0, 0)][j].data, self.step)
                     
@@ -455,4 +471,3 @@ class Trainer:
             pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
             model_dict.update(pretrained_dict)
             self.models[n].load_state_dict(model_dict)
-

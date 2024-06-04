@@ -3,14 +3,17 @@ from __future__ import absolute_import, division, print_function
 import time
 import json
 import datasets
+from torch.utils.data import DataLoader, DistributedSampler
 import networks
 import torch.optim as optim
 from utils import *
 from layers import *
 from torch.utils.data import DataLoader
 from tensorboardX import SummaryWriter
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group, destroy_process_group
 import torch.nn.functional as F
-
+import torch.distributed as dist
 class Trainer:
     def __init__(self, options):
         self.opt = options
@@ -20,72 +23,67 @@ class Trainer:
         assert self.opt.height % 32 == 0, "'height' must be a multiple of 32"
         assert self.opt.width % 32 == 0, "'width' must be a multiple of 32"
 
-        self.models = {}  # 字典
-        self.parameters_to_train = []  # 列表
-        self.parameters_to_train_1 = []
+        self.models = {}
+        self.parameters_to_train = []
 
-        self.device = torch.device("cpu" if self.opt.no_cuda else "cuda")
-        # self.device =torch.device("cpu")
-
-        self.num_scales = len(self.opt.scales)  # 4
-        self.num_input_frames = len(self.opt.frame_ids)  # 3
-        self.num_pose_frames = 2 if self.opt.pose_model_input == "pairs" else self.num_input_frames  # 2
+        # self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.num_scales = len(self.opt.scales)
+        self.num_input_frames = len(self.opt.frame_ids)
+        self.num_pose_frames = 2 if self.opt.pose_model_input == "pairs" else self.num_input_frames
 
         assert self.opt.frame_ids[0] == 0, "frame_ids must start with 0"
 
-        self.models["encoder"] = networks.ResnetEncoder(
-            self.opt.num_layers, self.opt.weights_init == "pretrained")  # 18
-        self.models["encoder"].to(self.device)
+        
+        self.gpu = int(os.environ["RANK"])
+       
+
+        # torch.cuda.set_device(self.rank)
+        # self.device = torch.device("cuda", self.rank)
+
+        
+        self.models["encoder"] = networks.ResnetEncoder(self.opt.num_layers, self.opt.weights_init == "pretrained")
+        self.models["encoder"] = nn.DataParallel(self.models["encoder"].to(self.device), device_ids=[self.rank])
         self.parameters_to_train += list(self.models["encoder"].parameters())
 
-        self.models["depth"] = networks.DepthDecoder(
-            self.models["encoder"].num_ch_enc, self.opt.scales)
-        self.models["depth"].to(self.device)
+        self.models["depth"] = networks.DepthDecoder(self.models["encoder"].module.num_ch_enc, self.opt.scales)
+        self.models["depth"] = nn.DataParallel(self.models["depth"].to(self.device), device_ids=[self.rank])
         self.parameters_to_train += list(self.models["depth"].parameters())
 
-        self.models["decompose_encoder"] = networks.ResnetEncoder(
-            self.opt.num_layers, self.opt.weights_init == "pretrained")  # 18
-        self.models["decompose_encoder"].to(self.device)
+        self.models["decompose_encoder"] = networks.ResnetEncoder(self.opt.num_layers, self.opt.weights_init == "pretrained")
+        self.models["decompose_encoder"] = nn.DataParallel(self.models["decompose_encoder"].to(self.device), device_ids=[self.rank])
         self.parameters_to_train += list(self.models["decompose_encoder"].parameters())
-        
-        self.models["decompose"] = networks.decompose_decoder(
-            self.models["decompose_encoder"].num_ch_enc, self.opt.scales)
-        self.models["decompose"].to(self.device)
+
+        self.models["decompose"] = networks.decompose_decoder(self.models["decompose_encoder"].module.num_ch_enc, self.opt.scales)
+        self.models["decompose"] = nn.DataParallel(self.models["decompose"].to(self.device), device_ids=[self.rank])
         self.parameters_to_train += list(self.models["decompose"].parameters())
 
-        self.models["adjust_net"]=networks.adjust_net()
-        self.models["adjust_net"].to(self.device)
+        self.models["adjust_net"] = networks.adjust_net()
+        self.models["adjust_net"] = nn.DataParallel(self.models["adjust_net"].to(self.device), device_ids=[self.rank])
         self.parameters_to_train += list(self.models["adjust_net"].parameters())
 
-        self.models["pose_encoder"] = networks.ResnetEncoder(
-            self.opt.num_layers,
-            self.opt.weights_init == "pretrained",
-            num_input_images=self.num_pose_frames)
-        self.models["pose_encoder"].to(self.device)
+        self.models["pose_encoder"] = networks.ResnetEncoder(self.opt.num_layers, self.opt.weights_init == "pretrained", num_input_images=self.num_pose_frames)
+        self.models["pose_encoder"] = nn.DataParallel(self.models["pose_encoder"].to(self.device), device_ids=[self.rank])
         self.parameters_to_train += list(self.models["pose_encoder"].parameters())
 
-        self.models["pose"] = networks.PoseDecoder(
-            self.models["pose_encoder"].num_ch_enc,
-            num_input_features=1,
-            num_frames_to_predict_for=2)
-        self.models["pose"].to(self.device)
+        self.models["pose"] = networks.PoseDecoder(self.models["pose_encoder"].module.num_ch_enc, num_input_features=1, num_frames_to_predict_for=2)
+        self.models["pose"] = nn.DataParallel(self.models["pose"].to(self.device), device_ids=[self.rank])
         self.parameters_to_train += list(self.models["pose"].parameters())
 
-        self.model_optimizer = optim.Adam(self.parameters_to_train,self.opt.learning_rate)
-        self.model_lr_scheduler = optim.lr_scheduler.MultiStepLR(
-            self.model_optimizer, [self.opt.scheduler_step_size], 0.1)
+        self.model_optimizer = optim.Adam(self.parameters_to_train, self.opt.learning_rate)
+
+        self.model_lr_scheduler = optim.lr_scheduler.MultiStepLR(self.model_optimizer, [self.opt.scheduler_step_size], 0.1)
 
         if self.opt.load_weights_folder is not None:
             self.load_model()
 
-        print("Training model named:\n  ", self.opt.model_name)
-        print("Models and tensorboard events files are saved to:\n  ", self.opt.log_dir)
-        print("Training is using:\n  ", self.device)
+        if self.rank == 0:
+            print("Training model named:\n  ", self.opt.model_name)
+            print("Models and tensorboard events files are saved to:\n  ", self.opt.log_dir)
+            print("Training is using:\n  ", self.device)
 
-        # data
+        # Data
         datasets_dict = {"endovis": datasets.SCAREDRAWDataset}
         self.dataset = datasets_dict[self.opt.dataset]
-        # print("tuishir")
         fpath = os.path.join(os.path.dirname(__file__), "splits", self.opt.split, "{}_files.txt")
         train_filenames = readlines(fpath.format("train"))
         val_filenames = readlines(fpath.format("val"))
@@ -94,23 +92,27 @@ class Trainer:
         num_train_samples = len(train_filenames)
         self.num_total_steps = num_train_samples // self.opt.batch_size * self.opt.num_epochs
 
-        train_dataset = self.dataset(
-            self.opt.data_path, train_filenames, self.opt.height, self.opt.width,
-            self.opt.frame_ids, 4, is_train=True, img_ext=img_ext)
-        self.train_loader = DataLoader(
-            train_dataset, self.opt.batch_size, True,
-            num_workers=self.opt.num_workers, pin_memory=True, drop_last=True)
-        val_dataset = self.dataset(
-            self.opt.data_path, val_filenames, self.opt.height, self.opt.width,
-            self.opt.frame_ids, 4, is_train=False, img_ext=img_ext)
-        self.val_loader = DataLoader(
-            val_dataset, self.opt.batch_size, False,
-            num_workers=1, pin_memory=True, drop_last=True)
+        train_dataset = self.dataset(self.opt.data_path, train_filenames, self.opt.height, self.opt.width,
+                                     self.opt.frame_ids, 4, is_train=True, img_ext=img_ext)
+        # self.train_sampler = DistributedSampler(train_dataset, num_replicas=self.world_size, rank=self.rank, shuffle=True)
+        self.train_sampler = DistributedSampler(train_dataset,shuffle = True)
+        self.train_loader = DataLoader(train_dataset, self.opt.batch_size, shuffle=False,
+                                       num_workers=self.opt.num_workers, pin_memory=True, drop_last=True, sampler=self.train_sampler)
+
+        val_dataset = self.dataset(self.opt.data_path, val_filenames, self.opt.height, self.opt.width,
+                                   self.opt.frame_ids, 4, is_train=False, img_ext=img_ext)
+        # self.val_sampler = DistributedSampler(val_dataset, num_replicas=self.world_size, rank=self.rank, shuffle=False)
+        self.val_sampler = DistributedSampler(val_dataset)
+        self.val_loader = DataLoader(val_dataset, self.opt.batch_size, shuffle=False,
+                                     num_workers=1, pin_memory=True, drop_last=True, sampler=self.val_sampler)
         self.val_iter = iter(self.val_loader)
 
         self.writers = {}
         for mode in ["train", "val"]:
-            self.writers[mode] = SummaryWriter(os.path.join(self.log_path, mode))
+            mode_path = os.path.join(self.log_path, mode)
+            if not os.path.exists(mode_path):
+                os.makedirs(mode_path)
+            self.writers[mode] = SummaryWriter(mode_path)
 
         
         self.ssim = SSIM()
@@ -455,4 +457,3 @@ class Trainer:
             pretrained_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict}
             model_dict.update(pretrained_dict)
             self.models[n].load_state_dict(model_dict)
-
