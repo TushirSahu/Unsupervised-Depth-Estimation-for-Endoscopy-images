@@ -12,7 +12,6 @@ import torch.nn as nn
 
 from collections import OrderedDict
 from layers import *
-from .newcrf import *
 
 
 class DepthDecoder(nn.Module):
@@ -46,24 +45,25 @@ class DepthDecoder(nn.Module):
             self.convs[("dispconv", s)] = Conv3x3(self.num_ch_dec[s], self.num_output_channels)
 
         self.decoder = nn.ModuleList(list(self.convs.values()))
-
         self.sigmoid = nn.Sigmoid()
-        self.crf = NewCRF(input_dim=num_ch_enc[-1],embed_dim=num_ch_enc[-1],v_dim=num_ch_enc[-1])
 
     def forward(self, input_features):
         self.outputs = {}
-        # decoder
+       
         x = input_features[-1]
         for i in range(4, -1, -1):
+
+            self.outputs[("upconv", i, 0)] = self.convs[("upconv", i, 0)](x)
             x = self.convs[("upconv", i, 0)](x)
+
             x = [upsample(x)]
             if self.use_skips and i > 0:
                 x += [input_features[i - 1]]
             x = torch.cat(x, 1)
-            if i==4:
-                v = x
-                x = self.crf(x,v)
+
+            self.outputs[("upconv", i, 1)] = self.convs[("upconv", i, 1)](x)
             x = self.convs[("upconv", i, 1)](x)
+
             if i in self.scales:
                 self.outputs[("disp", i)] = self.sigmoid(self.convs[("dispconv", i)](x))
 

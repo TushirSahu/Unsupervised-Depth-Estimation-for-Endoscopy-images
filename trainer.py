@@ -226,6 +226,7 @@ class Trainer:
 
         # we only feed the image with frame_id 0 through the depth encoder
         features = self.models["encoder"](inputs["color_aug", 0, 0])
+        print(features.size())
         outputs = self.models["depth"](features)
 
         # pose
